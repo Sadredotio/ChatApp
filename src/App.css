@@ -2,7 +2,7 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  font-family: -apple-system, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 body {
@@ -47,6 +47,11 @@ body {
   border: none;
   border-radius: 5px;
   cursor: pointer;
+  font-weight: bold;
+}
+
+.share-panel button:hover {
+  background-color: #20b858;
 }
 
 .chat-box {
@@ -79,6 +84,7 @@ body {
   position: relative;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 1px 1px rgba(0,0,0,0.1);
 }
 
 .message-bubble.me {
@@ -100,6 +106,7 @@ body {
 .msg-text {
   font-size: 15px;
   word-wrap: break-word;
+  color: #111;
 }
 
 .msg-meta {
@@ -119,12 +126,16 @@ body {
   font-size: 12px;
 }
 
+.read-tick.queued {
+  color: #888; /* Grey hourglass */
+}
+
 .read-tick.sent {
-  color: #888;
+  color: #888; /* Grey single tick */
 }
 
 .read-tick.read {
-  color: #34b7f1; /* WhatsApp Blue ticks */
+  color: #34b7f1; /* WhatsApp Blue double ticks */
 }
 
 .footer {
@@ -138,14 +149,16 @@ body {
 .image-upload-btn {
   font-size: 24px;
   cursor: pointer;
+  padding: 0 5px;
 }
 
 input[type="text"] {
   flex: 1;
-  padding: 12px;
+  padding: 12px 15px;
   border: none;
   border-radius: 20px;
   outline: none;
+  font-size: 15px;
 }
 
 button {
@@ -155,8 +168,10 @@ button {
   border: none;
   border-radius: 20px;
   cursor: pointer;
+  font-weight: bold;
 }
 
 button:disabled {
   background-color: #ccc;
+  cursor: not-allowed;
 }
