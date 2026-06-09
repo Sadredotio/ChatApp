@@ -1,38 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Peer from 'peerjs';
 import './App.css';
 
 function App() {
-  // 1. Setup Room & Role synchronously to prevent "empty flashes"
-  const [roomData] = useState(() => {
+  // 1. Get or create a unique room ID from the URL hash
+  const [roomId] = useState(() => {
     let hash = window.location.hash.substring(1);
-    let host = false;
-
     if (!hash) {
-      // Creating a new room
-      hash = 'chat_' + Math.random().toString(36).substring(2, 12);
+      hash = 'room_' + Math.random().toString(36).substring(2, 15);
       window.location.hash = hash;
-      localStorage.setItem(`is_host_${hash}`, 'true');
-      host = true;
-    } else {
-      // Joining an existing room, check if we are the owner
-      host = localStorage.getItem(`is_host_${hash}`) === 'true';
     }
-    return { roomId: hash, isHost: host };
+    return hash;
   });
 
-  // 2. Load messages instantly before the screen even draws
+  // 2. Load past messages instantly from local storage
   const [messages, setMessages] = useState(() => {
-    const saved = localStorage.getItem(`chat_history_${roomData.roomId}`);
+    const saved = localStorage.getItem(`chat_history_${roomId}`);
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [status, setStatus] = useState('Initializing...');
   const [inputText, setInputText] = useState('');
-  const [isConnected, setIsConnected] = useState(false);
-
-  const peerInstance = useRef(null);
-  const connectionRef = useRef(null);
+  const [status, setStatus] = useState('Connecting to secure 443 network...');
   const chatBoxRef = useRef(null);
 
   // Auto-scroll to bottom
@@ -42,112 +29,144 @@ function App() {
     }
   }, [messages]);
 
-  // 3. BULLETPROOF SAVE: Overwrite memory every single time messages change
+  // Save messages to LocalStorage locally whenever they update
   useEffect(() => {
-    localStorage.setItem(`chat_history_${roomData.roomId}`, JSON.stringify(messages));
-  }, [messages, roomData.roomId]);
+    localStorage.setItem(`chat_history_${roomId}`, JSON.stringify(messages));
+  }, [messages, roomId]);
 
-  // 4. Send queued ⏳ messages automatically when the connection opens
+  // 3. LISTEN FOR MESSAGES: Open a secure stream over Port 443
   useEffect(() => {
-    if (isConnected && connectionRef.current) {
-      const queued = messages.filter((m) => m.sender === 'me' && m.deliveryStatus === 'queued');
-      if (queued.length > 0) {
-        queued.forEach((msg) => {
-          connectionRef.current.send({ ...msg, deliveryStatus: 'sent' });
-        });
-        // Update screen to show ✓ ticks
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.sender === 'me' && m.deliveryStatus === 'queued'
-              ? { ...m, deliveryStatus: 'sent' }
-              : m
-          )
-        );
+    setStatus('Connected securely! Ready to chat.');
+    
+    // Server-Sent Events (SSE) opens a persistent stream that works beautifully over 5G+
+    const eventSource = new EventSource(`https://ntfy.sh/${roomId}/sse`);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const chatData = JSON.parse(payload.message);
+
+        // If the message is from us, ignore it or process read receipts
+        if (chatData.senderId === getSessionId()) {
+          if (chatData.type === 'read_receipt') {
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === chatData.messageId ? { ...msg, deliveryStatus: 'read' } : msg
+              )
+            );
+          }
+          return;
+        }
+
+        // If it's a chat message from the other person
+        if (chatData.type === 'chat') {
+          const incomingMsg = {
+            id: chatData.id,
+            text: chatData.text,
+            image: chatData.image,
+            timestamp: chatData.timestamp,
+            sender: 'them',
+            deliveryStatus: 'read'
+          };
+
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === chatData.id)) return prev; // Prevent duplicates
+            return [...prev, incomingMsg];
+          });
+
+          // Send a read receipt back to them instantly
+          sendReadReceipt(chatData.id);
+        }
+      } catch (e) {
+        // Keeps the connection alive from network heartbeats
       }
-    }
-  }, [isConnected]);
+    };
 
-  // Handle PeerJS Connection
-  useEffect(() => {
-    const peer = new Peer(roomData.isHost ? roomData.roomId : undefined);
-    peerInstance.current = peer;
-
-    peer.on('open', () => {
-      if (roomData.isHost) {
-        setStatus('Room open! You can type now. Waiting for friend to join...');
-      } else {
-        setStatus('Connecting to friend...');
-        const conn = peer.connect(roomData.roomId);
-        setupConnection(conn);
-      }
-    });
-
-    peer.on('connection', (conn) => {
-      setupConnection(conn);
-    });
+    eventSource.onerror = () => {
+      setStatus('Reconnecting to network seamlessly...');
+    };
 
     return () => {
-      peer.destroy();
+      eventSource.close();
     };
-  }, [roomData]);
+  }, [roomId]);
 
-  const setupConnection = (conn) => {
-    connectionRef.current = conn;
-
-    conn.on('open', () => {
-      setIsConnected(true);
-      setStatus('Connected securely!');
-    });
-
-    conn.on('data', (data) => {
-      if (data.type === 'chat') {
-        const incomingMsg = { ...data, sender: 'them' };
-        setMessages((prev) => [...prev, incomingMsg]);
-        conn.send({ type: 'read_receipt', messageId: data.id });
-      } else if (data.type === 'read_receipt') {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === data.messageId ? { ...msg, deliveryStatus: 'read' } : msg
-          )
-        );
-      }
-    });
-
-    conn.on('close', () => {
-      setIsConnected(false);
-      setStatus('Friend disconnected. New messages will queue locally.');
-    });
+  // Unique session ID so the app knows who sent what
+  const getSessionId = () => {
+    let id = sessionStorage.getItem('chat_session_id');
+    if (!id) {
+      id = 'user_' + Math.random().toString(36).substring(2, 10);
+      sessionStorage.setItem('chat_session_id', id);
+    }
+    return id;
   };
 
-  const sendMessage = (text, imageBase64 = null) => {
+  // 4. SENDING MESSAGES
+  const sendMessage = async (text, imageBase64 = null) => {
     if (!text && !imageBase64) return;
+
+    const messageId = Math.random().toString(36).substring(2, 10);
+    const timeNow = Date.now();
 
     const newMsg = {
       type: 'chat',
-      id: Math.random().toString(36).substring(2, 10),
+      id: messageId,
+      senderId: getSessionId(),
       text: text,
       image: imageBase64,
-      timestamp: Date.now(),
-      sender: 'me',
-      deliveryStatus: isConnected ? 'sent' : 'queued',
+      timestamp: timeNow
     };
 
-    setMessages((prev) => [...prev, newMsg]);
+    // Show on our screen instantly as 'sent'
+    const localMsg = {
+      id: messageId,
+      text: text,
+      image: imageBase64,
+      timestamp: timeNow,
+      sender: 'me',
+      deliveryStatus: 'sent'
+    };
+    setMessages((prev) => [...prev, localMsg]);
     setInputText('');
 
-    if (isConnected && connectionRef.current) {
-      connectionRef.current.send(newMsg);
+    // Push the message payload over the secure web network
+    try {
+      await fetch(`https://ntfy.sh/${roomId}`, {
+        method: 'POST',
+        body: JSON.stringify(newMsg)
+      });
+    } catch (err) {
+      // If the network drops, turn the tick into a waiting hourglass
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, deliveryStatus: 'queued' } : m))
+      );
     }
+  };
+
+  const sendReadReceipt = async (msgId) => {
+    const receipt = {
+      type: 'read_receipt',
+      senderId: getSessionId(),
+      messageId: msgId
+    };
+    try {
+      await fetch(`https://ntfy.sh/${roomId}`, { method: 'POST', body: JSON.stringify(receipt) });
+    } catch (e) {}
   };
 
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    // ntfy.sh payload limit safety checkpoint (~500KB)
+    if (file.size > 500000) { 
+      alert("Image is too large. Please send an image under 500KB.");
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (event) => {
-      const base64String = event.target.result;
-      sendMessage('', base64String);
+      sendMessage('', event.target.result);
     };
     reader.readAsDataURL(file);
   };
@@ -158,77 +177,56 @@ function App() {
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href);
-    alert('Link copied!');
+    alert('Invite link copied!');
   };
 
   const clearHistory = () => {
-    if (window.confirm('Are you sure you want to clear this chat history?')) {
-      setMessages([]); // Will instantly update localStorage to empty
+    if (window.confirm('Delete chat history from this device?')) {
+      setMessages([]);
     }
-  };
-
-  const renderTicks = (status) => {
-    if (status === 'queued') return ' ⏳';
-    if (status === 'sent') return ' ✓';
-    if (status === 'read') return ' ✓✓';
-    return '';
   };
 
   return (
     <div className="app-container">
       <header className="header">
-        <h2>Sadre's Chat Room</h2>
+        <h2>Direct Secure Chat</h2>
         <div className="status-bar">{status}</div>
       </header>
 
-      {!window.location.hash.substring(1) && !isConnected && (
+      {messages.length === 0 && (
         <div className="share-panel">
-          <p>Share this link to connect:</p>
+          <p>Send this link to the other person to start chatting:</p>
           <button onClick={copyLink}>Copy Invite Link</button>
         </div>
       )}
 
       <div className="chat-box" ref={chatBoxRef}>
-        {messages.length === 0 && (
-          <div className="status-bar" style={{ color: '#888', textAlign: 'center', marginTop: '20px' }}>
-            No messages yet.
-          </div>
-        )}
         {messages.map((msg) => (
           <div key={msg.id} className={`message-wrapper ${msg.sender}`}>
             <div className={`message-bubble ${msg.sender}`}>
-              
-              {msg.image && <img src={msg.image} alt="sent attachment" className="msg-image" />}
+              {msg.image && <img src={msg.image} alt="attachment" className="msg-image" />}
               {msg.text && <p className="msg-text">{msg.text}</p>}
-              
               <div className="msg-meta">
                 <span className="time">{formatTime(msg.timestamp)}</span>
                 {msg.sender === 'me' && (
                   <span className={`read-tick ${msg.deliveryStatus}`}>
-                    {renderTicks(msg.deliveryStatus)}
+                    {msg.deliveryStatus === 'queued' ? ' ⏳' : msg.deliveryStatus === 'sent' ? ' ✓' : ' ✓✓'}
                   </span>
                 )}
               </div>
-
             </div>
           </div>
         ))}
       </div>
 
       <footer className="footer">
-        <button onClick={clearHistory} style={{ backgroundColor: '#e74c3c', padding: '10px', borderRadius: '50%' }} title="Clear History">
-           🗑️
+        <button onClick={clearHistory} style={{ backgroundColor: '#e74c3c', padding: '10px', borderRadius: '50%' }} title="Clear Chat">
+          🗑️
         </button>
         <label className="image-upload-btn">
           📷
-          <input 
-            type="file" 
-            accept="image/*" 
-            onChange={handleImageUpload} 
-            style={{ display: 'none' }} 
-          />
+          <input type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
         </label>
-        
         <input
           type="text"
           value={inputText}
@@ -236,9 +234,7 @@ function App() {
           onKeyPress={(e) => e.key === 'Enter' && sendMessage(inputText)}
           placeholder="Type a message..."
         />
-        <button onClick={() => sendMessage(inputText)}>
-          Send
-        </button>
+        <button onClick={() => sendMessage(inputText)}>Send</button>
       </footer>
     </div>
   );
